@@ -10,6 +10,12 @@ class ReconstructionTask : public Task
 public:
     ReconstructionTask(std::string id);
 
+    //new method for single file process
+    void processSingleFile(const std::string& bil_file_path);
+    void setExtraRunning(std::atomic<bool>* ext_running){
+        external_running_ = ext_running;
+    }
+
 private:
     void run() override;
 
@@ -26,10 +32,16 @@ private:
     void setThreshold(const cv::Mat &src_mat);
     void matToHObject(const cv::Mat &src_mat, HObject *dst_hobj);
 
+    //new core method
+    void performReconstruction();
+
     bool drawing_box_ = false;
     cv::Rect box_{0, 0, 0, 0};
 
     int temp_threshold_ = 0;
     cv::Mat src_mat_{};
     cv::Mat dst_mat_{};
+
+    //new atrri
+    std::atomic<bool>* external_running_{nullptr};
 };

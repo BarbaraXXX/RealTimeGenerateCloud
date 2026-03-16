@@ -53,6 +53,18 @@ struct hvSystemPoses
     HTuple hv_movement_poses;
 };
 
+struct RealTimeParams
+{
+    std::string host;
+    std::string user;
+    int port;
+    std::string password;
+    std::string remote_data_dir;
+    std::string local_temp_dir;
+    int scan_interval_seconds;
+    std::string local_simulation_dir;
+};
+
 enum class Path
 {
     PosesDir,
@@ -90,12 +102,30 @@ public:
     hvProgramParams hv_program_params_;
     hvSystemPoses hv_system_poses_;
 
+    RealTimeParams rt_params_;
+
     // Flag parameters
     mutable bool calibration_flag_ = true;
     bool save_cloud_flag_;
     bool set_roi_flag_;
     bool select_entire_frame_;
-    bool set_threshold_flag_ = true;
+    
+    //2026.1.18 add
+    bool save_line_cloud_flag_ = false;
+    int line_cloud_stride_ = 1;
+    std::string line_cloud_file_type_ = "ply_binary";
+    //2026.1.18 add finish
+
+    //2026.3.1 add udp
+    bool udp_send_enabled_ = true;
+    std::string udp_host_ = "127.0.0.1";
+    int udp_port_ = 9000;
+    int udp_mtu_ = 1400;
+    //2026.3.1 add finish
+
+    bool set_threshold_flag_ = false;
+
+
 
     std::string config_path_;
     int img_width_;

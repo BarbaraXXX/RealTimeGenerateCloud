@@ -4,6 +4,8 @@
 /data/imgs
 /data/ins
 /data/logs
+/data/temp_scan_data
+/data/videos
 /generate_cloud_core/build
 /generate_cloud_core/bin
 /generate_cloud_core/third_party

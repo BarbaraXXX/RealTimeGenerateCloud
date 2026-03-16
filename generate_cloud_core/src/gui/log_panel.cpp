@@ -28,7 +28,7 @@ void LogPanel::render()
             color = ImVec4(1, 1, 1, 1);
             break;
         case Logger::LogLevel::Warn:
-            color = ImVec4(1, 1, 0, 1);
+            color = ImVec4(1, 1, 0, 1); 
             break;
         case Logger::LogLevel::Error:
             color = ImVec4(1, 0, 0, 1);

@@ -200,6 +200,36 @@ void ParamsPanel::render()
             {
                 AppController::instance().publish("params_update", std::make_any<ParamUpdateEvent>("save_cloud_flag", std::make_any<bool>(state_.save_cloud_flag), "ui"));
             }
+            //2026.1.18 add
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("Save Lines");
+            ImGui::SameLine(120);
+            if (ImGui::Checkbox("##Save Lines", &state_.save_line_cloud_flag))
+            {
+                AppController::instance().publish("params_update", std::make_any<ParamUpdateEvent>("save_line_cloud_flag", std::make_any<bool>(state_.save_line_cloud_flag), "ui"));
+            }
+
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("Line Stride");
+            ImGui::SameLine(120);
+            if (ImGui::InputInt("##Line Stride", &state_.line_cloud_stride))
+            {
+                if (state_.line_cloud_stride < 1) state_.line_cloud_stride = 1;
+                AppController::instance().publish("params_update",
+                    std::make_any<ParamUpdateEvent>("line_cloud_stride",
+                        std::make_any<int>(state_.line_cloud_stride), "ui"));
+            }
+
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("Line File Type");
+            ImGui::SameLine(120);
+            if (ImGui::InputText("##Line File Type", state_.line_cloud_file_type, sizeof(state_.line_cloud_file_type)))
+            {
+                AppController::instance().publish("params_update",
+                    std::make_any<ParamUpdateEvent>("line_cloud_file_type",
+                        std::make_any<std::string>(std::string(state_.line_cloud_file_type)), "ui"));
+            }
+            //2026.1.18 add finish
 
             {
                 ImGuiDisabledBlock disabled_setting_roi(state_.select_entire_frame);
@@ -220,6 +250,60 @@ void ParamsPanel::render()
                 AppController::instance().publish("params_update", std::make_any<ParamUpdateEvent>("select_entire_frame", std::make_any<bool>(state_.select_entire_frame), "ui"));
             }
         }
+
+        //2026.3.1 add udp
+        ImGui::SeparatorText("UDP Streaming");
+        {
+            // Enable
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("UDP Send");
+            ImGui::SameLine(120);
+            if (ImGui::Checkbox("##UDP Send", &state_.udp_send_enabled))
+            {
+                AppController::instance().publish("params_update",
+                    std::make_any<ParamUpdateEvent>("udp_send_enabled",
+                        std::make_any<bool>(state_.udp_send_enabled), "ui"));
+            }
+
+            // Host
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("UDP Host");
+            ImGui::SameLine(120);
+            if (ImGui::InputText("##UDP Host", state_.udp_host, sizeof(state_.udp_host)))
+            {
+                AppController::instance().publish("params_update",
+                    std::make_any<ParamUpdateEvent>("udp_host",
+                        std::make_any<std::string>(std::string(state_.udp_host)), "ui"));
+            }
+
+            // Port
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("UDP Port");
+            ImGui::SameLine(120);
+            if (ImGui::InputInt("##UDP Port", &state_.udp_port))
+            {
+                if (state_.udp_port < 1) state_.udp_port = 1;
+                if (state_.udp_port > 65535) state_.udp_port = 65535;
+                AppController::instance().publish("params_update",
+                    std::make_any<ParamUpdateEvent>("udp_port",
+                        std::make_any<int>(state_.udp_port), "ui"));
+            }
+
+            // MTU
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("UDP MTU");
+            ImGui::SameLine(120);
+            if (ImGui::InputInt("##UDP MTU", &state_.udp_mtu))
+            {
+                if (state_.udp_mtu < 256) state_.udp_mtu = 256;
+                if (state_.udp_mtu > 65000) state_.udp_mtu = 65000;
+                AppController::instance().publish("params_update",
+                    std::make_any<ParamUpdateEvent>("udp_mtu",
+                        std::make_any<int>(state_.udp_mtu), "ui"));
+            }
+        }
+        //2026.3.1 add finish
+
     }
     catch (const std::exception &e)
     {
@@ -347,6 +431,56 @@ void ParamsPanel::initParamsUpdateMap()
     {
         this->state_.save_cloud_flag = std::any_cast<bool>(e.value);
     };
+    //2026.1.18 add
+    params_update_map_["save_line_cloud_flag"] = [this](const ParamUpdateEvent &e)
+    {
+        this->state_.save_line_cloud_flag = std::any_cast<bool>(e.value);
+    };
+    params_update_map_["line_cloud_stride"] = [this](const ParamUpdateEvent &e)
+    {
+        this->state_.line_cloud_stride = std::any_cast<int>(e.value);
+        if (this->state_.line_cloud_stride < 1) this->state_.line_cloud_stride = 1;
+    };
+
+    params_update_map_["line_cloud_file_type"] = [this](const ParamUpdateEvent &e)
+    {
+        std::string v = std::any_cast<const std::string &>(e.value);
+#ifdef _WIN32
+        strncpy_s(this->state_.line_cloud_file_type, sizeof(this->state_.line_cloud_file_type), v.c_str(), _TRUNCATE);
+#else
+        std::strncpy(this->state_.line_cloud_file_type, v.c_str(), sizeof(this->state_.line_cloud_file_type) - 1);
+        this->state_.line_cloud_file_type[sizeof(this->state_.line_cloud_file_type) - 1] = '\0';
+#endif
+    };
+    //2026.1.18 add finish
+
+    //2026.3.1 add udp
+    params_update_map_["udp_send_enabled"] = [this](const ParamUpdateEvent &e)
+    {
+        this->state_.udp_send_enabled = std::any_cast<bool>(e.value);
+    };
+    params_update_map_["udp_host"] = [this](const ParamUpdateEvent &e)
+    {
+        std::string v = std::any_cast<const std::string &>(e.value);
+    #ifdef _WIN32
+        strncpy_s(this->state_.udp_host, sizeof(this->state_.udp_host), v.c_str(), _TRUNCATE);
+    #else
+        std::strncpy(this->state_.udp_host, v.c_str(), sizeof(this->state_.udp_host) - 1);
+        this->state_.udp_host[sizeof(this->state_.udp_host) - 1] = '\0';
+    #endif
+    };
+
+    params_update_map_["udp_port"] = [this](const ParamUpdateEvent &e)
+    {
+        this->state_.udp_port = std::any_cast<int>(e.value);
+    };
+    params_update_map_["udp_mtu"] = [this](const ParamUpdateEvent &e)
+    {
+        this->state_.udp_mtu = std::any_cast<int>(e.value);
+    };
+
+    //2026.3.1 add finish
+
 
     params_update_map_["set_roi_flag"] = [this](const ParamUpdateEvent &e)
     {

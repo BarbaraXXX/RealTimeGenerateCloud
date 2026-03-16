@@ -3,6 +3,7 @@
 #include "app_controller.h"
 #include "calibration_task.h"
 #include "reconstruction_task.h"
+#include "real_time_reconstruction_task.h"
 
 TaskManager::TaskManager(Mode mode)
 {
@@ -197,6 +198,18 @@ void TaskManager::initMethodMap()
     // {
     //     this->stopTask("merger");
     // };
+
+    //new task : real time reconstruction
+    this->method_map_["real_time_reconstruction"]["start"] = [this]()
+    {
+        auto rt_task = new RealTimeReconstructionTask("real_time_reconstruction");
+        this->startTask("real_time_reconstruction", rt_task);
+    };
+
+    this->method_map_["real_time_reconstruction"]["stop"] = [this]()
+    {
+        this->stopTask("real_time_reconstruction");
+    };
 }
 
 void TaskManager::initHandleMap()
@@ -396,6 +409,54 @@ void TaskManager::initParamsUpdateMap()
         bool val = std::any_cast<bool>(event.value);
         SystemParams::instance().save_cloud_flag_ = val;
     };
+    //2026.1.18 add 
+    this->params_update_map_["save_line_cloud_flag"] = [this](const ParamUpdateEvent &event)
+    {
+        bool val = std::any_cast<bool>(event.value);
+        SystemParams::instance().save_line_cloud_flag_ = val;
+    };
+    this->params_update_map_["line_cloud_stride"] = [this](const ParamUpdateEvent &event)
+    {
+        int val = std::any_cast<int>(event.value);
+        if (val < 1) val = 1;
+        SystemParams::instance().line_cloud_stride_ = val;
+    };
+    this->params_update_map_["line_cloud_file_type"] = [this](const ParamUpdateEvent &event)
+    {
+        std::string val = std::any_cast<const std::string &>(event.value);
+        SystemParams::instance().line_cloud_file_type_ = val;
+    };
+    //2026.1.18 add finish
+
+    //2026.3.1 add udp
+    this->params_update_map_["udp_send_enabled"] = [this](const ParamUpdateEvent &event)
+    {
+        bool val = std::any_cast<bool>(event.value);
+        SystemParams::instance().udp_send_enabled_ = val;
+    };
+
+    this->params_update_map_["udp_host"] = [this](const ParamUpdateEvent &event)
+    {
+        std::string val = std::any_cast<const std::string &>(event.value);
+        SystemParams::instance().udp_host_ = val;
+    };
+
+    this->params_update_map_["udp_port"] = [this](const ParamUpdateEvent &event)
+    {
+        int val = std::any_cast<int>(event.value);
+        if (val < 1) val = 1;
+        if (val > 65535) val = 65535;
+        SystemParams::instance().udp_port_ = val;
+    };
+
+    this->params_update_map_["udp_mtu"] = [this](const ParamUpdateEvent &event)
+    {
+        int val = std::any_cast<int>(event.value);
+        if (val < 256) val = 256;
+        if (val > 65000) val = 65000;
+        SystemParams::instance().udp_mtu_ = val;
+    };
+    //2026.3.1 add finish
 
     this->params_update_map_["set_roi_flag"] = [this](const ParamUpdateEvent &event)
     {

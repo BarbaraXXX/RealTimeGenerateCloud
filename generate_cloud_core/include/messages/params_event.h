@@ -28,6 +28,20 @@ struct ParamsPanelState
     int reconstruction_roi_col2 = 0;
 
     bool save_cloud_flag = false;
+
+    //2026.1.18 add
+    bool save_line_cloud_flag = false;
+    int line_cloud_stride = 1;
+    char line_cloud_file_type[64] = "ply_binary";
+    //2026.1.18 add finish
+
+    //2026.3.1 add udp
+    bool udp_send_enabled = true;
+    char udp_host[64] = "127.0.0.1";
+    int udp_port = 9000;
+    int udp_mtu = 1400;
+    //2026.3.1 add finish
+
     bool set_roi_flag = false;
     bool select_entire_frame = true;
 

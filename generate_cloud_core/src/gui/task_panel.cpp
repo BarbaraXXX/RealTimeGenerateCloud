@@ -10,28 +10,68 @@ TaskPanel::TaskPanel()
     this->initHandleMap();
 }
 
+// void TaskPanel::render()
+// {
+//     ImGui::Begin("Task Panel");
+
+//     ImGuiTabBarFlags tab_bar_flags = ImGuiTabBarFlags_None;
+//     if (ImGui::BeginTabBar("Task Panel Tab Bar", tab_bar_flags))
+//     {
+//         if (ImGui::BeginTabItem("Reconstruction"))
+//         {
+//             reconstruction_page_->draw();
+//             ImGui::EndTabItem();
+//         }
+
+//         if (ImGui::BeginTabItem("Calibration"))
+//         {
+//             calibration_page_->draw();
+//             ImGui::EndTabItem();
+//         }
+
+//         ImGui::EndTabBar();
+//     }
+
+//     ImGui::End();
+// }
+
+//rewrite render()
 void TaskPanel::render()
 {
     ImGui::Begin("Task Panel");
-
     ImGuiTabBarFlags tab_bar_flags = ImGuiTabBarFlags_None;
     if (ImGui::BeginTabBar("Task Panel Tab Bar", tab_bar_flags))
     {
         if (ImGui::BeginTabItem("Reconstruction"))
         {
+            ImGui::SeparatorText("Batch Reconstruction");
             reconstruction_page_->draw();
+            
+            ImGui::Dummy(ImVec2(0.0f, 20.0f)); // Add some space
+            ImGui::SeparatorText("Real-Time Reconstruction");
+ 
+            if (ImGui::Button("Start Real-Time Scan"))
+            {
+                AppController::instance().publish("task_command", std::make_any<std::pair<std::string, std::string>>("real_time_reconstruction", "start"));
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Stop Real-Time Scan"))
+            {
+                AppController::instance().publish("task_command", std::make_any<std::pair<std::string, std::string>>("real_time_reconstruction", "stop"));
+            }
+ 
             ImGui::EndTabItem();
         }
-
+ 
         if (ImGui::BeginTabItem("Calibration"))
         {
             calibration_page_->draw();
             ImGui::EndTabItem();
         }
-
+ 
         ImGui::EndTabBar();
     }
-
+ 
     ImGui::End();
 }
 

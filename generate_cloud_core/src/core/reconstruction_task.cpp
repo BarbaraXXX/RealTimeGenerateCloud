@@ -2,39 +2,203 @@
 
 #include <filesystem>
 #include <iostream>
+#include <algorithm>
+#include <iomanip>
+#include <sstream>
+#include <string>
+
+#include <fstream>
+#include <vector>
+#include <cstdint>
+
+//2026.3.1 add udp
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #pragma comment(lib, "Ws2_32.lib")
+#else
+    #include <arpa/inet.h>
+    #include <sys/socket.h>
+    #include <netdb.h>
+    #include <unistd.h>
+#endif
+//2026.3.1 add finish
 
 #include "app_controller.h"
 
+//2026.3.1 add udp
+static bool udp_send_file_chunks(const std::string& host,
+                                 int port,
+                                 int mtu,
+                                 const std::string& file_name,
+                                 const std::string& file_path)
+{
+    // Read file
+    std::ifstream fin(file_path, std::ios::binary);
+    if (!fin.is_open()) return false;
+    std::vector<uint8_t> data((std::istreambuf_iterator<char>(fin)), std::istreambuf_iterator<char>());
+
+    // Minimal sanity
+    if (mtu < 256) mtu = 256;
+    if (port < 1 || port > 65535) return false;
+
+    // Packet header:
+    // [u32 magic][u32 msg_id][u32 chunk_idx][u32 total_chunks][u16 name_len][name][payload]
+    const uint32_t magic = 0x31464350u; // 'PCF1' little-endian for debug
+    static uint32_t msg_id = 1;
+
+    const uint16_t name_len = static_cast<uint16_t>(std::min<size_t>(file_name.size(), 60000));
+    const int header_size = 4 + 4 + 4 + 4 + 2 + name_len;
+    if (header_size >= mtu) return false;
+
+    const int payload_max = mtu - header_size;
+    const uint32_t total_chunks = (payload_max <= 0) ? 0u : static_cast<uint32_t>((data.size() + payload_max - 1) / payload_max);
+    if (total_chunks == 0) return false;
+
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
+#endif
+
+    int sockfd = static_cast<int>(socket(AF_INET, SOCK_DGRAM, 0));
+    if (sockfd < 0)
+    {
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return false;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+#ifdef _WIN32
+    if (InetPtonA(AF_INET, host.c_str(), &addr.sin_addr) != 1)
+#else
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1)
+#endif
+    {
+#ifdef _WIN32
+        closesocket(sockfd);
+        WSACleanup();
+#else
+        close(sockfd);
+#endif
+        return false;
+    }
+
+    std::vector<uint8_t> packet;
+    packet.resize(mtu);
+
+    auto write_u32 = [](uint8_t* p, uint32_t v) {
+        p[0] = static_cast<uint8_t>(v & 0xFF);
+        p[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+        p[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
+        p[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
+    };
+    auto write_u16 = [](uint8_t* p, uint16_t v) {
+        p[0] = static_cast<uint8_t>(v & 0xFF);
+        p[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+    };
+
+    const uint32_t cur_msg = msg_id++;
+    for (uint32_t i = 0; i < total_chunks; ++i)
+    {
+        const size_t off = static_cast<size_t>(i) * payload_max;
+        const size_t len = std::min<size_t>(payload_max, data.size() - off);
+
+        uint8_t* p = packet.data();
+        write_u32(p + 0, magic);
+        write_u32(p + 4, cur_msg);
+        write_u32(p + 8, i);
+        write_u32(p + 12, total_chunks);
+        write_u16(p + 16, name_len);
+        std::memcpy(p + 18, file_name.data(), name_len);
+        std::memcpy(p + 18 + name_len, data.data() + off, len);
+
+        const int send_len = 18 + name_len + static_cast<int>(len);
+        int sent = static_cast<int>(sendto(sockfd,
+                                           reinterpret_cast<const char*>(packet.data()),
+                                           send_len, 0,
+                                           reinterpret_cast<sockaddr*>(&addr),
+                                           sizeof(addr)));
+        if (sent <= 0)
+        {
+            // Best-effort: stop on first failure
+            break;
+        }
+    }
+
+#ifdef _WIN32
+    closesocket(sockfd);
+    WSACleanup();
+#else
+    close(sockfd);
+#endif
+    return true;
+}
+//2026.3.1 add finish
 ReconstructionTask::ReconstructionTask(std::string id) : Task(id)
 {
 }
 
+//rewreite
 void ReconstructionTask::run()
 {
     try
     {
-        if (SystemParams::instance().calibration_flag_)
-        {
-            AppController::instance().getLogger().log("Please calibrate first!", Logger::LogLevel::Warn);
-            return;
-        }
-
-        this->findDatafiles();
-
-        if (SystemParams::instance().valid_files_.empty())
-        {
-            AppController::instance().getLogger().log("No valid .bil files found.", Logger::LogLevel::Error);
-            return;
-        }
-
-        this->preprocess();
-        this->reconstruction();
+        findDatafiles();
+        performReconstruction();
     }
-    catch (const std::exception &e)
+    catch(const std::exception& e)
     {
         std::string msg = std::string("[Error in Reconstruction Task] ") + e.what();
         AppController::instance().getLogger().log(msg, Logger::LogLevel::Error);
     }
+}
+
+//new method
+void ReconstructionTask::processSingleFile(const std::string& bil_file_path)
+{
+    try
+    {
+        if(!std::filesystem::exists(bil_file_path))
+        {
+            throw std::runtime_error("File does not exist: " + bil_file_path);
+        }
+
+        SystemParams::instance().valid_files_.clear();
+        SystemParams::instance().valid_files_.push_back(bil_file_path);
+
+        SystemParams::instance().frame_count_.clear();
+        std::uintmax_t file_size = std::filesystem::file_size(bil_file_path);
+        const size_t img_size = SystemParams::instance().img_width_ * SystemParams::instance().img_height_;
+        SystemParams::instance().frame_count_.push_back(static_cast<int>(file_size / img_size));
+        performReconstruction();
+    }
+    catch(const std::exception& e)
+    {
+        throw std::runtime_error(std::string("[Error in processSingleFile]") + e.what());
+    }
+}
+
+//new method
+void ReconstructionTask::performReconstruction()
+{
+    if(SystemParams::instance().calibration_flag_)
+    {
+        AppController::instance().getLogger().log("Please calibrate first! ", Logger::LogLevel::Warn);
+        return;
+    }
+
+    if(SystemParams::instance().valid_files_.empty())
+    {
+        AppController::instance().getLogger().log("No valid .bil file found to process.", Logger::LogLevel::Warn);
+        return;
+    }
+
+    preprocess();
+    reconstruction();
 }
 
 void ReconstructionTask::findDatafiles()
@@ -137,19 +301,318 @@ void ReconstructionTask::findDatafiles()
     }
 }
 
+// void ReconstructionTask::reconstruction()
+// {
+//     try
+//     {
+//         const int img_width  = SystemParams::instance().img_width_;
+//         const int img_height = SystemParams::instance().img_height_;
+//         const size_t img_size = SystemParams::instance().img_size_;
+
+//         // Prepare a "template" image to get full size
+//         HObject ho_profile_image;
+//         HTuple hv_width, hv_height;
+//         this->matToHObject(src_mat_, &ho_profile_image);
+//         GetImageSize(ho_profile_image, &hv_width, &hv_height);
+
+//         // Profile ROI region
+//         HObject ho_profile_region;
+//         GenRectangle1(&ho_profile_region,
+//                       SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row1,
+//                       SystemParams::instance().hv_program_params_.hv_reconstruction_roi_col1,
+//                       SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row2,
+//                       SystemParams::instance().hv_program_params_.hv_reconstruction_roi_col2);
+
+//         // Helper: decide running state (support external_running_)
+//         auto shouldContinue = [this]() -> bool {
+//             if (external_running_ != nullptr) return external_running_->load();
+//             return running_.load();
+//         };
+
+//         // Helper: extract output dir as std::string
+//         auto getOutputDir = []() -> std::string {
+//             // hv_reconstruction_output_dir is an HTuple, typically scalar
+//             return SystemParams::instance().hv_program_params_.hv_reconstruction_output_dir[0].S().Text();
+//         };
+
+//         // Helper: extension for file type (HALCON WriteObjectModel3d)
+//         auto extOf = [](const std::string &t) -> std::string {
+//             if (t == "obj") return ".obj";
+//             if (t == "ply" || t == "ply_binary") return ".ply";
+//             if (t == "stl" || t == "stl_ascii" || t == "stl_binary") return ".stl";
+//             if (t == "off") return ".off";
+//             if (t == "om3") return ".om3";
+//             return "";
+//         };
+
+//         // movement pose slicing (pose length usually 7)
+//         auto getMovementPoseForFrame = [](int frame_idx) -> HTuple {
+//             HTuple movement_all = SystemParams::instance().hv_system_poses_.hv_movement_poses;
+//             const int pose_len = 7;
+
+//             if (movement_all.Length() == pose_len)
+//             {
+//                 return movement_all;
+//             }
+//             if (movement_all.Length() > pose_len && (movement_all.Length() % pose_len == 0))
+//             {
+//                 const int start = frame_idx * pose_len;
+//                 const int end = start + pose_len - 1;
+//                 if (end < movement_all.Length())
+//                     return movement_all.TupleSelectRange(start, end);
+//             }
+//             return HTuple(); // empty -> will use default transformation
+//         };
+
+//         for (size_t file_idx = 0; file_idx < SystemParams::instance().valid_files_.size(); file_idx++)
+//         {
+//             try
+//             {
+//                 // Open BIL
+//                 std::ifstream bil_file(SystemParams::instance().valid_files_[file_idx], std::ios::binary);
+//                 if (!bil_file.is_open())
+//                 {
+//                     std::string msg = "Can't open " + SystemParams::instance().valid_files_[file_idx];
+//                     AppController::instance().getLogger().log(msg, Logger::LogLevel::Error);
+//                     continue;
+//                 }
+//                 bil_file.seekg(0, std::ios::beg);
+
+//                 const int frame_count = SystemParams::instance().frame_count_[file_idx];
+//                 if (frame_count <= 0)
+//                 {
+//                     AppController::instance().getLogger().log("Invalid frame count for file: " + SystemParams::instance().valid_files_[file_idx],
+//                                                              Logger::LogLevel::Warn);
+//                     bil_file.close();
+//                     continue;
+//                 }
+
+//                 // Build output paths once per file
+//                 std::string processed_time;
+//                 std::string save_prefix;
+//                 std::filesystem::path lines_dir;
+
+//                 if (SystemParams::instance().save_cloud_flag_ || SystemParams::instance().save_line_cloud_flag_)
+//                 {
+//                     processed_time = this->getTime();
+//                     std::filesystem::path file_path = SystemParams::instance().valid_files_[file_idx];
+//                     const std::string output_dir = getOutputDir();
+//                     save_prefix = output_dir + "/" + file_path.stem().string() + "_" + processed_time;
+
+//                     if (SystemParams::instance().save_line_cloud_flag_)
+//                     {
+//                         lines_dir = std::filesystem::path(save_prefix);
+//                         try { std::filesystem::create_directories(lines_dir); }
+//                         catch (const std::exception &e)
+//                         {
+//                             AppController::instance().getLogger().log(
+//                                 std::string("Failed to create line output directory: ") + lines_dir.string() + " : " + e.what(),
+//                                 Logger::LogLevel::Error
+//                             );
+//                         }
+//                     }
+//                 }
+
+//                 // Prepare pose transform (m -> mm)
+//                 HTuple hv_pose_trans = SystemParams::instance().hv_system_poses_.hv_camera_pose;
+//                 hv_pose_trans[0] = HTuple(SystemParams::instance().hv_system_poses_.hv_camera_pose[0]) * 1000;
+//                 hv_pose_trans[1] = HTuple(SystemParams::instance().hv_system_poses_.hv_camera_pose[1]) * 1000;
+//                 hv_pose_trans[2] = HTuple(SystemParams::instance().hv_system_poses_.hv_camera_pose[2]) * 1000;
+
+//                 // ==========
+//                 // Two models:
+//                 //   - full_model: accumulates all profiles via SetProfileSheetOfLight
+//                 //   - line_model: num_profiles=1, reused each frame to measure current profile once
+//                 // ==========
+//                 HTuple hv_full_model_id;
+//                 HTuple hv_line_model_id;
+
+//                 // full model
+//                 HTuple frame_nums;
+//                 frame_nums[0] = frame_count;
+//                 CreateSheetOfLightModel(ho_profile_region,
+//                                         ((HTuple("min_gray").Append("num_profiles")).Append("ambiguity_solving")),
+//                                         (SystemParams::instance().hv_program_params_.hv_reconstruction_min_threshold.TupleConcat(frame_nums)).TupleConcat("first"),
+//                                         &hv_full_model_id);
+//                 SetSheetOfLightParam(hv_full_model_id, "calibration", "xyz");
+//                 SetSheetOfLightParam(hv_full_model_id, "scale", "mm");
+//                 SetSheetOfLightParam(hv_full_model_id, "camera_parameter", SystemParams::instance().hv_system_poses_.hv_camera_params);
+//                 SetSheetOfLightParam(hv_full_model_id, "camera_pose", SystemParams::instance().hv_system_poses_.hv_camera_pose);
+//                 SetSheetOfLightParam(hv_full_model_id, "lightplane_pose", SystemParams::instance().hv_system_poses_.hv_light_plane_poses);
+//                 // Do NOT set "movement_pose" as a whole array here; we pass per-frame pose to SetProfileSheetOfLight.
+
+//                 // line model (1 profile)
+//                 HTuple one_profile_nums;
+//                 one_profile_nums[0] = 1;
+//                 CreateSheetOfLightModel(ho_profile_region,
+//                                         ((HTuple("min_gray").Append("num_profiles")).Append("ambiguity_solving")),
+//                                         (SystemParams::instance().hv_program_params_.hv_reconstruction_min_threshold.TupleConcat(one_profile_nums)).TupleConcat("first"),
+//                                         &hv_line_model_id);
+//                 SetSheetOfLightParam(hv_line_model_id, "calibration", "xyz");
+//                 SetSheetOfLightParam(hv_line_model_id, "scale", "mm");
+//                 SetSheetOfLightParam(hv_line_model_id, "camera_parameter", SystemParams::instance().hv_system_poses_.hv_camera_params);
+//                 SetSheetOfLightParam(hv_line_model_id, "camera_pose", SystemParams::instance().hv_system_poses_.hv_camera_pose);
+//                 SetSheetOfLightParam(hv_line_model_id, "lightplane_pose", SystemParams::instance().hv_system_poses_.hv_light_plane_poses);
+
+//                 // Per-line output controls (configurable)
+//                 const std::string line_file_type = SystemParams::instance().line_cloud_file_type_;
+//                 //const int line_stride = std::max(1, SystemParams::instance().line_cloud_stride_);
+//                 const int line_stride = (SystemParams::instance().line_cloud_stride_ < 1) ? 1 : SystemParams::instance().line_cloud_stride_;
+//                 // Temporary HObjects for processing
+//                 HObject ho_image;
+//                 HObject ho_final_image;
+//                 HObject ho_image_part, ho_laser_image;
+
+//                 // Loop frames
+//                 for (int frame = 0; frame < frame_count; frame++)
+//                 {
+//                     if (!shouldContinue())
+//                         break;
+
+//                     std::streampos offset = static_cast<std::streampos>(frame) * static_cast<std::streampos>(img_size);
+//                     bil_file.seekg(offset, std::ios::beg);
+
+//                     std::vector<uint8_t> img_data(img_size);
+//                     bil_file.read(reinterpret_cast<char *>(img_data.data()), img_size);
+
+//                     if (static_cast<size_t>(bil_file.gcount()) < img_size)
+//                     {
+//                         std::string msg = "Error reading frame " + std::to_string(frame) + " from " + SystemParams::instance().valid_files_[file_idx];
+//                         AppController::instance().getLogger().log(msg, Logger::LogLevel::Warn);
+//                         break;
+//                     }
+
+//                     cv::Mat temp_img(img_height, img_width, CV_8UC1, img_data.data());
+//                     this->matToHObject(temp_img, &ho_image);
+
+//                     // ROI crop
+//                     CropRectangle1(ho_image, &ho_image_part,
+//                                    SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row1,
+//                                    SystemParams::instance().hv_program_params_.hv_reconstruction_roi_col1,
+//                                    SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row2,
+//                                    SystemParams::instance().hv_program_params_.hv_reconstruction_roi_col2);
+
+//                     // laser extraction on ROI
+//                     this->extractLaser(ho_image_part, &ho_laser_image, SystemParams::instance().hv_program_params_.hv_reconstruction_min_threshold);
+
+//                     // paste back to full-size image
+//                     this->resizeImage(ho_laser_image, hv_width, hv_height, &ho_final_image,
+//                                       SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row1,
+//                                       SystemParams::instance().hv_program_params_.hv_reconstruction_roi_col1);
+
+//                     // ===== Measure current profile ONCE using line model =====
+//                     ResetSheetOfLightModel(hv_line_model_id);
+
+//                     HTuple movement_pose_frame = getMovementPoseForFrame(frame);
+//                     if (movement_pose_frame.Length() > 0)
+//                     {
+//                         SetSheetOfLightParam(hv_line_model_id, "movement_pose", movement_pose_frame);
+//                     }
+
+//                     MeasureProfileSheetOfLight(ho_final_image, hv_line_model_id, HTuple());
+
+//                     // Get disparity for current profile and append to full model
+//                     HObject ho_disparity;
+//                     GetSheetOfLightResult(&ho_disparity, hv_line_model_id, "disparity");
+//                     SetProfileSheetOfLight(ho_disparity, hv_full_model_id, movement_pose_frame);
+
+//                     // ===== Optional: save per-line model (stride-controlled) =====
+//                     if (SystemParams::instance().save_line_cloud_flag_ &&
+//                         (SystemParams::instance().save_cloud_flag_ || !save_prefix.empty()) &&
+//                         ((frame % line_stride) == 0))
+//                     {
+//                         try
+//                         {
+//                             HTuple hv_line_obj_id, hv_line_obj_affine;
+//                             GetSheetOfLightResultObjectModel3d(hv_line_model_id, &hv_line_obj_id);
+//                             RigidTransObjectModel3d(hv_line_obj_id, hv_pose_trans, &hv_line_obj_affine);
+
+//                             std::ostringstream oss;
+//                             oss << "line_" << std::setw(6) << std::setfill('0') << (frame + 1);
+//                             std::filesystem::path line_save = lines_dir / (oss.str() + extOf(line_file_type));
+//                             HTuple line_save_path = line_save.string().c_str();
+
+//                             WriteObjectModel3d(hv_line_obj_affine, line_file_type.c_str(), line_save_path, HTuple(), HTuple());
+//                         }
+//                         catch (const HException &e)
+//                         {
+//                             AppController::instance().getLogger().log(
+//                                 std::string("HALCON error while saving line: ") + e.ErrorMessage().Text(),
+//                                 Logger::LogLevel::Warn
+//                             );
+//                         }
+//                         catch (const std::exception &e)
+//                         {
+//                             AppController::instance().getLogger().log(
+//                                 std::string("Error while saving line: ") + e.what(),
+//                                 Logger::LogLevel::Warn
+//                             );
+//                         }
+//                     }
+//                 }
+
+//                 AppController::instance().getLogger().log("Process finished.");
+//                 bil_file.close();
+
+//                 // ===== Export full model (same as your original behavior) =====
+//                 HTuple hv_object_model_3d_id;
+//                 GetSheetOfLightResultObjectModel3d(hv_full_model_id, &hv_object_model_3d_id);
+
+//                 HTuple hv_object_model_affine_trans;
+//                 RigidTransObjectModel3d(hv_object_model_3d_id, hv_pose_trans, &hv_object_model_affine_trans);
+
+//                 if (SystemParams::instance().save_cloud_flag_)
+//                 {
+//                     std::filesystem::path file_path = SystemParams::instance().valid_files_[file_idx];
+//                     HTuple save_path = (getOutputDir() + "/" + file_path.stem().string() + "_" + processed_time).c_str();
+//                     WriteObjectModel3d(hv_object_model_affine_trans, "obj", save_path, HTuple(), HTuple());
+
+//                     std::string msg = "Save to " + std::string(save_path[0].S().Text());
+//                     AppController::instance().getLogger().log(msg);
+//                 }
+
+//                 // Clear models to avoid handle accumulation
+//                 ClearSheetOfLightModel(hv_full_model_id);
+//                 ClearSheetOfLightModel(hv_line_model_id);
+
+//                 if (!shouldContinue())
+//                 {
+//                     return;
+//                 }
+//             }
+//             catch (const HException &exception)
+//             {
+//                 std::string msg = "Error in " + SystemParams::instance().valid_files_[file_idx] + " file: " + exception.ErrorMessage().Text();
+//                 AppController::instance().getLogger().log(msg, Logger::LogLevel::Error);
+//             }
+//             catch (const std::exception &e)
+//             {
+//                 std::string msg = "Error in " + SystemParams::instance().valid_files_[file_idx] + " file: " + e.what();
+//                 AppController::instance().getLogger().log(msg, Logger::LogLevel::Error);
+//             }
+//         }
+//     }
+//     catch (const std::exception &e)
+//     {
+//         std::string msg = std::string("Error in reconstruction: ") + e.what();
+//         AppController::instance().getLogger().log(msg, Logger::LogLevel::Error);
+//     }
+// }
 void ReconstructionTask::reconstruction()
 {
     try
     {
-        const int img_width = SystemParams::instance().img_width_;
+        const int img_width  = SystemParams::instance().img_width_;
         const int img_height = SystemParams::instance().img_height_;
         const size_t img_size = SystemParams::instance().img_size_;
 
+        // Prepare a "template" image to get full size
         HObject ho_profile_image;
         HTuple hv_width, hv_height;
         this->matToHObject(src_mat_, &ho_profile_image);
         GetImageSize(ho_profile_image, &hv_width, &hv_height);
 
+        // Profile ROI region
         HObject ho_profile_region;
         GenRectangle1(&ho_profile_region,
                       SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row1,
@@ -157,19 +620,52 @@ void ReconstructionTask::reconstruction()
                       SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row2,
                       SystemParams::instance().hv_program_params_.hv_reconstruction_roi_col2);
 
+        // Helper: decide running state (support external_running_)
+        auto shouldContinue = [this]() -> bool {
+            if (external_running_ != nullptr) return external_running_->load();
+            return running_.load();
+        };
+
+        // Helper: extract output dir as std::string
+        auto getOutputDir = []() -> std::string {
+            // hv_reconstruction_output_dir is an HTuple, typically scalar
+            return SystemParams::instance().hv_program_params_.hv_reconstruction_output_dir[0].S().Text();
+        };
+
+        // Helper: extension for file type (HALCON WriteObjectModel3d)
+        auto extOf = [](const std::string &t) -> std::string {
+            if (t == "obj") return ".obj";
+            if (t == "ply" || t == "ply_binary") return ".ply";
+            if (t == "stl" || t == "stl_ascii" || t == "stl_binary") return ".stl";
+            if (t == "off") return ".off";
+            if (t == "om3") return ".om3";
+            return "";
+        };
+
+        // movement pose slicing (pose length usually 7)
+        auto getMovementPoseForFrame = [](int frame_idx) -> HTuple {
+            HTuple movement_all = SystemParams::instance().hv_system_poses_.hv_movement_poses;
+            const int pose_len = 7;
+
+            if (movement_all.Length() == pose_len)
+            {
+                return movement_all;
+            }
+            if (movement_all.Length() > pose_len && (movement_all.Length() % pose_len == 0))
+            {
+                const int start = frame_idx * pose_len;
+                const int end = start + pose_len - 1;
+                if (end < movement_all.Length())
+                    return movement_all.TupleSelectRange(start, end);
+            }
+            return HTuple(); // empty -> will use default transformation
+        };
+
         for (size_t file_idx = 0; file_idx < SystemParams::instance().valid_files_.size(); file_idx++)
         {
             try
-            { // Local iconic variables
-                HObject ho_image;
-
-                // Local iconic variables
-                HTuple hv_window_handle;
-                HTuple hv_sheet_of_light_model_id, hv_object_model_3d_id;
-
-                HTuple frame_nums;
-                frame_nums[0] = SystemParams::instance().frame_count_[file_idx];
-
+            {
+                // Open BIL
                 std::ifstream bil_file(SystemParams::instance().valid_files_[file_idx], std::ios::binary);
                 if (!bil_file.is_open())
                 {
@@ -179,87 +675,217 @@ void ReconstructionTask::reconstruction()
                 }
                 bil_file.seekg(0, std::ios::beg);
 
+                const int frame_count = SystemParams::instance().frame_count_[file_idx];
+                if (frame_count <= 0)
+                {
+                    AppController::instance().getLogger().log("Invalid frame count for file: " + SystemParams::instance().valid_files_[file_idx],
+                                                             Logger::LogLevel::Warn);
+                    bil_file.close();
+                    continue;
+                }
+
+                // ============================================================
+                // Output path rules (use current .bil stem as "timestamp" source)
+                //   - Folder: <output_dir>/<stem>/
+                //   - Line files: <stem>_<index>.<ext>
+                //   - Full model: <stem>_full.obj
+                // ============================================================
+                std::filesystem::path bil_path = SystemParams::instance().valid_files_[file_idx];
+                const std::string stem = bil_path.stem().string();      // e.g. 2025-4-20_10-20-30
+                const std::string output_dir = getOutputDir();
+                std::filesystem::path out_dir = std::filesystem::path(output_dir) / stem;
+
+                if (SystemParams::instance().save_cloud_flag_ || SystemParams::instance().save_line_cloud_flag_)
+                {
+                    try { std::filesystem::create_directories(out_dir); }
+                    catch (const std::exception &e)
+                    {
+                        AppController::instance().getLogger().log(
+                            std::string("Failed to create output directory: ") + out_dir.string() + " : " + e.what(),
+                            Logger::LogLevel::Error
+                        );
+                    }
+                }
+
+                // Prepare pose transform (m -> mm)
+                HTuple hv_pose_trans = SystemParams::instance().hv_system_poses_.hv_camera_pose;
+                hv_pose_trans[0] = HTuple(SystemParams::instance().hv_system_poses_.hv_camera_pose[0]) * 1000;
+                hv_pose_trans[1] = HTuple(SystemParams::instance().hv_system_poses_.hv_camera_pose[1]) * 1000;
+                hv_pose_trans[2] = HTuple(SystemParams::instance().hv_system_poses_.hv_camera_pose[2]) * 1000;
+
+                // ==========
+                // Two models:
+                //   - full_model: accumulates all profiles via SetProfileSheetOfLight
+                //   - line_model: num_profiles=1, reused each frame to measure current profile once
+                // ==========
+                HTuple hv_full_model_id;
+                HTuple hv_line_model_id;
+
+                // full model
+                HTuple frame_nums;
+                frame_nums[0] = frame_count;
                 CreateSheetOfLightModel(ho_profile_region,
                                         ((HTuple("min_gray").Append("num_profiles")).Append("ambiguity_solving")),
                                         (SystemParams::instance().hv_program_params_.hv_reconstruction_min_threshold.TupleConcat(frame_nums)).TupleConcat("first"),
-                                        &hv_sheet_of_light_model_id);
-                SetSheetOfLightParam(hv_sheet_of_light_model_id, "calibration", "xyz");
-                SetSheetOfLightParam(hv_sheet_of_light_model_id, "scale", "mm");
-                SetSheetOfLightParam(hv_sheet_of_light_model_id, "camera_parameter", SystemParams::instance().hv_system_poses_.hv_camera_params);
-                SetSheetOfLightParam(hv_sheet_of_light_model_id, "camera_pose", SystemParams::instance().hv_system_poses_.hv_camera_pose);
-                SetSheetOfLightParam(hv_sheet_of_light_model_id, "lightplane_pose", SystemParams::instance().hv_system_poses_.hv_light_plane_poses);
-                SetSheetOfLightParam(hv_sheet_of_light_model_id, "movement_pose", SystemParams::instance().hv_system_poses_.hv_movement_poses);
+                                        &hv_full_model_id);
+                SetSheetOfLightParam(hv_full_model_id, "calibration", "xyz");
+                SetSheetOfLightParam(hv_full_model_id, "scale", "mm");
+                SetSheetOfLightParam(hv_full_model_id, "camera_parameter", SystemParams::instance().hv_system_poses_.hv_camera_params);
+                SetSheetOfLightParam(hv_full_model_id, "camera_pose", SystemParams::instance().hv_system_poses_.hv_camera_pose);
+                SetSheetOfLightParam(hv_full_model_id, "lightplane_pose", SystemParams::instance().hv_system_poses_.hv_light_plane_poses);
+                // Do NOT set "movement_pose" as a whole array here; we pass per-frame pose to SetProfileSheetOfLight.
 
+                // line model (1 profile)
+                HTuple one_profile_nums;
+                one_profile_nums[0] = 1;
+                CreateSheetOfLightModel(ho_profile_region,
+                                        ((HTuple("min_gray").Append("num_profiles")).Append("ambiguity_solving")),
+                                        (SystemParams::instance().hv_program_params_.hv_reconstruction_min_threshold.TupleConcat(one_profile_nums)).TupleConcat("first"),
+                                        &hv_line_model_id);
+                SetSheetOfLightParam(hv_line_model_id, "calibration", "xyz");
+                SetSheetOfLightParam(hv_line_model_id, "scale", "mm");
+                SetSheetOfLightParam(hv_line_model_id, "camera_parameter", SystemParams::instance().hv_system_poses_.hv_camera_params);
+                SetSheetOfLightParam(hv_line_model_id, "camera_pose", SystemParams::instance().hv_system_poses_.hv_camera_pose);
+                SetSheetOfLightParam(hv_line_model_id, "lightplane_pose", SystemParams::instance().hv_system_poses_.hv_light_plane_poses);
+
+                // Per-line output controls (configurable)
+                const std::string line_file_type = SystemParams::instance().line_cloud_file_type_;
+                const int line_stride = (SystemParams::instance().line_cloud_stride_ < 1) ? 1 : SystemParams::instance().line_cloud_stride_;
+
+                // Temporary HObjects for processing
+                HObject ho_image;
                 HObject ho_final_image;
-                HObject ho_image_part, ho_gray_image, ho_laser_image;
-                CropRectangle1(ho_profile_image, &ho_image_part,
-                               SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row1,
-                               SystemParams::instance().hv_program_params_.hv_reconstruction_roi_col1,
-                               SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row2,
-                               SystemParams::instance().hv_program_params_.hv_reconstruction_roi_col2);
+                HObject ho_image_part, ho_laser_image;
 
-                for (size_t frame = 0; frame < SystemParams::instance().frame_count_[file_idx]; frame++)
+                // Loop frames
+                for (int frame = 0; frame < frame_count; frame++)
                 {
-                    std::string msg = "Processing: " + std::to_string(frame + 1) + "/" + std::to_string(SystemParams::instance().frame_count_[file_idx]) + " frames";
-                    AppController::instance().getLogger().log(msg);
-                    if (!running_.load())
-                    {
+                    if (!shouldContinue())
                         break;
-                    }
-                    std::streampos offset = frame * img_size;
+
+                    std::streampos offset = static_cast<std::streampos>(frame) * static_cast<std::streampos>(img_size);
                     bil_file.seekg(offset, std::ios::beg);
+
                     std::vector<uint8_t> img_data(img_size);
                     bil_file.read(reinterpret_cast<char *>(img_data.data()), img_size);
-                    if (bil_file.gcount() < img_size)
+
+                    if (static_cast<size_t>(bil_file.gcount()) < img_size)
                     {
                         std::string msg = "Error reading frame " + std::to_string(frame) + " from " + SystemParams::instance().valid_files_[file_idx];
                         AppController::instance().getLogger().log(msg, Logger::LogLevel::Warn);
                         break;
                     }
+
                     cv::Mat temp_img(img_height, img_width, CV_8UC1, img_data.data());
                     this->matToHObject(temp_img, &ho_image);
+
+                    // ROI crop
                     CropRectangle1(ho_image, &ho_image_part,
                                    SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row1,
                                    SystemParams::instance().hv_program_params_.hv_reconstruction_roi_col1,
                                    SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row2,
                                    SystemParams::instance().hv_program_params_.hv_reconstruction_roi_col2);
+
+                    // laser extraction on ROI
                     this->extractLaser(ho_image_part, &ho_laser_image, SystemParams::instance().hv_program_params_.hv_reconstruction_min_threshold);
 
-                    // Putting the cropped ROI area back into the original image
+                    // paste back to full-size image
                     this->resizeImage(ho_laser_image, hv_width, hv_height, &ho_final_image,
                                       SystemParams::instance().hv_program_params_.hv_reconstruction_roi_row1,
                                       SystemParams::instance().hv_program_params_.hv_reconstruction_roi_col1);
-                    MeasureProfileSheetOfLight(ho_final_image, hv_sheet_of_light_model_id, HTuple());
+
+                    // ===== Measure current profile ONCE using line model =====
+                    ResetSheetOfLightModel(hv_line_model_id);
+
+                    HTuple movement_pose_frame = getMovementPoseForFrame(frame);
+                    if (movement_pose_frame.Length() > 0)
+                    {
+                        SetSheetOfLightParam(hv_line_model_id, "movement_pose", movement_pose_frame);
+                    }
+
+                    MeasureProfileSheetOfLight(ho_final_image, hv_line_model_id, HTuple());
+
+                    // Get disparity for current profile and append to full model
+                    HObject ho_disparity;
+                    GetSheetOfLightResult(&ho_disparity, hv_line_model_id, "disparity");
+                    SetProfileSheetOfLight(ho_disparity, hv_full_model_id, movement_pose_frame);
+
+                    // ===== Optional: save per-line model (stride-controlled) =====
+                    if (SystemParams::instance().save_line_cloud_flag_ && ((frame % line_stride) == 0))
+                    {
+                        try
+                        {
+                            HTuple hv_line_obj_id, hv_line_obj_affine;
+                            GetSheetOfLightResultObjectModel3d(hv_line_model_id, &hv_line_obj_id);
+                            RigidTransObjectModel3d(hv_line_obj_id, hv_pose_trans, &hv_line_obj_affine);
+
+                            const int line_index = frame + 1; // 1-based
+                            const std::string filename = stem + "_" + std::to_string(line_index) + extOf(line_file_type);
+
+                            std::filesystem::path line_save = out_dir / filename;
+                            HTuple line_save_path = line_save.string().c_str();
+
+                            WriteObjectModel3d(hv_line_obj_affine, line_file_type.c_str(), line_save_path, HTuple(), HTuple());
+
+                            //2026.3.1 add udp
+                            if (SystemParams::instance().udp_send_enabled_)
+                            {
+                                const std::string host = SystemParams::instance().udp_host_;
+                                const int port = SystemParams::instance().udp_port_;
+                                const int mtu = SystemParams::instance().udp_mtu_;
+                                const std::string fname = line_save.filename().string();
+                                const std::string fpath = line_save.string();
+
+                                if (!udp_send_file_chunks(host, port, mtu, fname, fpath))
+                                {
+                                    AppController::instance().getLogger().log("[UDP] Failed to send " + fname, Logger::LogLevel::Warn);
+                                }
+                            }
+                            //2026.3.1 add finish
+                        }
+                        catch (const HException &e)
+                        {
+                            AppController::instance().getLogger().log(
+                                std::string("HALCON error while saving line: ") + e.ErrorMessage().Text(),
+                                Logger::LogLevel::Warn
+                            );
+                        }
+                        catch (const std::exception &e)
+                        {
+                            AppController::instance().getLogger().log(
+                                std::string("Error while saving line: ") + e.what(),
+                                Logger::LogLevel::Warn
+                            );
+                        }
+                    }
                 }
 
+                AppController::instance().getLogger().log("Process finished.");
                 bil_file.close();
 
-                // Get the resulting images and close the sheet-of-light handle
-                GetSheetOfLightResultObjectModel3d(hv_sheet_of_light_model_id, &hv_object_model_3d_id);
+                // ===== Export full model (same as your original behavior) =====
+                HTuple hv_object_model_3d_id;
+                GetSheetOfLightResultObjectModel3d(hv_full_model_id, &hv_object_model_3d_id);
 
-                // from wcs to camera cs
-                HTuple hv_object_model_affine_trans, hv_pose_trans;
-                hv_pose_trans = SystemParams::instance().hv_system_poses_.hv_camera_pose;
-
-                // form m to mm
-                hv_pose_trans[0] = HTuple(SystemParams::instance().hv_system_poses_.hv_camera_pose[0]) * 1000;
-                hv_pose_trans[1] = HTuple(SystemParams::instance().hv_system_poses_.hv_camera_pose[1]) * 1000;
-                hv_pose_trans[2] = HTuple(SystemParams::instance().hv_system_poses_.hv_camera_pose[2]) * 1000;
+                HTuple hv_object_model_affine_trans;
                 RigidTransObjectModel3d(hv_object_model_3d_id, hv_pose_trans, &hv_object_model_affine_trans);
 
-                // Save the model
                 if (SystemParams::instance().save_cloud_flag_)
                 {
-                    std::string processed_time = this->getTime();
-                    std::filesystem::path file_path = SystemParams::instance().valid_files_[file_idx];
-                    HTuple save_path = SystemParams::instance().hv_program_params_.hv_reconstruction_output_dir + "/" + file_path.stem().string().c_str() + "_" + processed_time.c_str();
+                    // Full cloud: <output_dir>/<stem>/<stem>_full.obj
+                    std::filesystem::path full_save = out_dir / (stem + "_full.obj");
+                    HTuple save_path = full_save.string().c_str();
+
                     WriteObjectModel3d(hv_object_model_affine_trans, "obj", save_path, HTuple(), HTuple());
 
-                    std::string msg = "Save to " + std::string(save_path[0].S().Text());
-                    AppController::instance().getLogger().log(msg);
+                    AppController::instance().getLogger().log("Save to " + full_save.string());
                 }
 
-                if (!running_.load())
+                // Clear models to avoid handle accumulation
+                ClearSheetOfLightModel(hv_full_model_id);
+                ClearSheetOfLightModel(hv_line_model_id);
+
+                if (!shouldContinue())
                 {
                     return;
                 }
@@ -452,7 +1078,6 @@ void ReconstructionTask::preprocess()
 
 void ReconstructionTask::setRoi(const cv::Mat &src_mat)
 {
-
     AppController::instance().getLogger().log("Please select the ROI region");
     double max_size = 700;
     int window_width, window_height;
